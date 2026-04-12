@@ -35,6 +35,10 @@ except (ModuleNotFoundError, ImportError):
 
 DELIVERY_RADIUS = 1.0  # Must be within 1 unit of house to deliver
 
+# Score must be STRICTLY in (0, 1) — never exactly 0.0 or 1.0.
+# Submission systems reject boundary scores. We clamp to [EPS, 1 - EPS].
+SCORE_EPS = 0.001
+
 TASKS: Dict[str, Dict[str, Any]] = {
     "easy": {
         "warehouse": (0, 0),
@@ -105,21 +109,25 @@ def _compute_score(
     Hard mode: 50% penalty if steps exceed max_steps.
     """
     if total_packages == 0:
-        return 0.0
+        return SCORE_EPS
     if actual_distance <= 0:
-        return 0.0
+        return SCORE_EPS
     if packages_delivered == 0:
-        return 0.0
+        return SCORE_EPS
 
     delivery_ratio = packages_delivered / total_packages
-    base_score = optimal_distance / actual_distance
+    # Clamp base_score to <= 1.0 before multiplying so that partial delivery
+    # (which uses less actual_distance) cannot inflate the score above the
+    # delivery_ratio. Prevents gaming by stopping after one delivery.
+    base_score = min(optimal_distance / actual_distance, 1.0)
     score = base_score * delivery_ratio
 
     # Hard mode time penalty
     if max_steps is not None and steps_taken > max_steps:
         score *= 0.5
 
-    return min(max(score, 0.0), 1.0)
+    # Clamp to STRICT open interval (0, 1) per submission requirements.
+    return min(max(score, SCORE_EPS), 1.0 - SCORE_EPS)
 
 
 class DroneEnvironment(Environment):

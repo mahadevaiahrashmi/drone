@@ -10,22 +10,30 @@ Each task needs a deterministic grader that scores agent performance 0.0–1.0. 
 
 ### Formula
 ```
-base_score = optimal_distance / actual_distance
+base_score = min(optimal_distance / actual_distance, 1.0)
 delivery_ratio = packages_delivered / total_packages
 score = base_score * delivery_ratio
+final_score = clamp(score, SCORE_EPS, 1.0 - SCORE_EPS)   # SCORE_EPS = 0.001
 ```
 
-Clamped to [0.0, 1.0].
+Scores are clamped to the STRICT open interval `(0, 1)` — never exactly
+`0.0` or `1.0`. Submission systems reject boundary scores, so perfect
+performance maps to `0.999` and worst performance maps to `0.001`.
+
+`base_score` is capped at 1.0 BEFORE multiplying by `delivery_ratio` —
+otherwise partial delivery (shorter actual distance) would inflate the
+base ratio and cancel out the delivery penalty, letting an agent score
+1.0 by stopping after one delivery.
 
 ### Hard mode time limit
 If `steps_taken > max_steps`: score = score * 0.5 (50% penalty)
 
-### Edge cases
-- Agent delivers all packages via optimal route → score = 1.0
+### Edge cases (with strict-interval clamp)
+- Agent delivers all packages via optimal route → score = 0.999
 - Agent delivers all but takes 2x optimal distance → score = 0.5
 - Agent delivers 2 of 4 packages optimally → score = 0.5 (delivery_ratio)
-- Agent delivers 0 packages → score = 0.0
-- Agent doesn't move → actual_distance = 0 → score = 0.0 (special case)
+- Agent delivers 0 packages → score = 0.001
+- Agent doesn't move → actual_distance = 0 → score = 0.001
 
 ### Optimal distance computation
 Brute-force all permutations of delivery order. Max 4 houses = 24 permutations. Compute: warehouse → house_perm[0] → house_perm[1] → ... → house_perm[n]. Shortest total Euclidean distance wins. Precomputed at task init.
