@@ -26,7 +26,11 @@ from typing import List, Optional
 
 from openai import OpenAI
 
-from drone import DroneAction, DroneEnv
+try:
+    from drone import DroneAction, DroneEnv
+except ImportError:
+    from client import DroneEnv
+    from models import DroneAction
 
 IMAGE_NAME = os.getenv("IMAGE_NAME")
 API_KEY = os.getenv("HF_TOKEN") or os.getenv("API_KEY")
@@ -140,10 +144,48 @@ def get_model_action(client: OpenAI, obs_text: str) -> str:
         return '{"action_type": "fly_to", "x": 0, "y": 0}'
 
 
+class _LocalResult:
+    """Mimics StepResult for the in-process path."""
+    def __init__(self, obs):
+        self.observation = obs
+        self.reward = obs.reward
+        self.done = obs.done
+
+
+class _LocalEnv:
+    """In-process drone env — no Docker, no HTTP. Async to match EnvClient API."""
+    def __init__(self, task: str):
+        from server.drone_environment import DroneEnvironment
+        self._env = DroneEnvironment()
+        self._task = task
+
+    async def reset(self):
+        return _LocalResult(self._env.reset(self._task))
+
+    async def step(self, action):
+        return _LocalResult(self._env.step(action))
+
+    async def close(self):
+        pass
+
+
 async def main() -> None:
+    local_mode = os.getenv("LOCAL_MODE", "").lower() in ("1", "true", "yes")
+
     client = OpenAI(base_url=API_BASE_URL, api_key=API_KEY)
 
-    env = await DroneEnv.from_docker_image(IMAGE_NAME)
+    base_url = os.getenv("BASE_URL")
+
+    if local_mode:
+        env = _LocalEnv(TASK_NAME)
+    elif base_url:
+        env = DroneEnv(base_url=base_url)
+    else:
+        if not IMAGE_NAME:
+            raise RuntimeError(
+                "Set one of: LOCAL_MODE=1, BASE_URL=http://..., or IMAGE_NAME=<docker-image>."
+            )
+        env = await DroneEnv.from_docker_image(IMAGE_NAME)
 
     rewards: List[float] = []
     steps_taken = 0
