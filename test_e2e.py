@@ -264,9 +264,13 @@ def test_error_cases(r: TestReport):
     r.check("deliver far from house: error", obs.error is not None)
     r.check("deliver far from house: delivered=0", obs.packages_delivered == 0)
 
-    # Unknown action
-    obs = env.step(DroneAction(action_type="teleport", x=1, y=1))
-    r.check("unknown action: error", obs.error is not None)
+    # Unknown action — Pydantic Literal rejects at parse time
+    try:
+        DroneAction(action_type="teleport", x=1, y=1)
+        rejected = False
+    except Exception:
+        rejected = True
+    r.check("unknown action: rejected at parse time", rejected)
 
     # fly_to with missing coords
     obs = env.step(DroneAction(action_type="fly_to"))

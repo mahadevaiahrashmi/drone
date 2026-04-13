@@ -11,10 +11,14 @@ The drone picks up packages at a warehouse and delivers them to houses
 on a 2D integer coordinate grid. Actions: fly_to(x,y), pick_up(), deliver().
 """
 
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Literal, Optional
 
 from openenv.core.env_server.types import Action, Observation
 from pydantic import Field
+
+
+ActionType = Literal["fly_to", "pick_up", "deliver"]
+VALID_ACTION_TYPES: List[str] = ["fly_to", "pick_up", "deliver"]
 
 
 class HouseInfo(Observation):
@@ -35,7 +39,7 @@ class DroneAction(Action):
     - deliver: deliver package to nearest house within radius (must be near a house)
     """
 
-    action_type: str = Field(
+    action_type: ActionType = Field(
         ..., description="One of: 'fly_to', 'pick_up', 'deliver'"
     )
     x: Optional[int] = Field(default=None, description="Target X coordinate (for fly_to)")
@@ -56,6 +60,14 @@ class DroneObservation(Observation):
     distance_traveled: float = Field(default=0.0, description="Total Euclidean distance traveled")
     steps_taken: int = Field(default=0, description="Number of actions taken")
     max_steps: Optional[int] = Field(default=None, description="Step limit (hard mode only)")
-    error: Optional[str] = Field(default=None, description="Error message if last action was invalid")
+    error: Optional[str] = Field(default=None, description="Human-readable error message if last action was invalid")
+    error_details: Optional[Dict[str, Any]] = Field(
+        default=None,
+        description="Structured error: {code, got, valid, suggestion} — stable shape for LLM parsing",
+    )
+    valid_actions: List[str] = Field(
+        default_factory=lambda: list(VALID_ACTION_TYPES),
+        description="The set of valid action_type values",
+    )
     score: float = Field(default=0.0, description="Current grader score (0.0-1.0)")
     task_name: str = Field(default="", description="Current task name")

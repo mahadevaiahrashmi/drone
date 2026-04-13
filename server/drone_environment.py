@@ -17,6 +17,7 @@ Tasks:
 - hard: 4 houses, max_steps time limit
 """
 
+import difflib
 import math
 from itertools import permutations
 from typing import Any, Dict, List, Optional, Tuple
@@ -26,9 +27,9 @@ from openenv.core.env_server.interfaces import Environment
 from openenv.core.env_server.types import State
 
 try:
-    from ..models import DroneAction, DroneObservation, HouseInfo
+    from ..models import DroneAction, DroneObservation, HouseInfo, VALID_ACTION_TYPES
 except (ModuleNotFoundError, ImportError):
-    from models import DroneAction, DroneObservation, HouseInfo
+    from models import DroneAction, DroneObservation, HouseInfo, VALID_ACTION_TYPES
 
 
 # --- Task Configurations ---
@@ -159,6 +160,7 @@ class DroneEnvironment(Environment):
         self._distance_traveled = 0.0
         self._optimal_distance = 0.0
         self._error: Optional[str] = None
+        self._error_details: Optional[Dict[str, Any]] = None
 
     def reset(self, task: str = "easy") -> DroneObservation:
         """Reset the environment for a given task.
@@ -182,6 +184,7 @@ class DroneEnvironment(Environment):
         self._delivered = {h[0]: False for h in self._task_config["houses"]}
         self._distance_traveled = 0.0
         self._error = None
+        self._error_details = None
         self._optimal_distance = _compute_optimal_distance(
             warehouse, self._task_config["houses"]
         )
@@ -191,67 +194,113 @@ class DroneEnvironment(Environment):
     def step(self, action: DroneAction) -> DroneObservation:
         """Execute one action.
 
-        Args:
-            action: DroneAction with action_type and optional x, y
-
-        Returns:
-            DroneObservation with updated state
+        Invalid actions (unknown type, missing coords, out-of-radius pickup)
+        set a structured error and do NOT consume a step from the budget.
+        Only actions that successfully mutate state increment step_count.
         """
-        self._state.step_count += 1
         self._error = None
+        self._error_details = None
 
         action_type = action.action_type.lower().strip()
 
         if action_type == "fly_to":
-            self._handle_fly_to(action.x, action.y)
+            mutated = self._handle_fly_to(action.x, action.y)
         elif action_type == "pick_up":
-            self._handle_pick_up()
+            mutated = self._handle_pick_up()
         elif action_type == "deliver":
-            self._handle_deliver()
+            mutated = self._handle_deliver()
         else:
-            self._error = f"Unknown action: '{action.action_type}'. Use 'fly_to', 'pick_up', or 'deliver'."
+            mutated = False
+            suggestion = difflib.get_close_matches(
+                action_type, VALID_ACTION_TYPES, n=1, cutoff=0.5
+            )
+            self._set_error(
+                code="invalid_action_type",
+                message=(
+                    f"Unknown action: '{action.action_type}'. "
+                    f"Use one of: {', '.join(VALID_ACTION_TYPES)}."
+                ),
+                got=action.action_type,
+                suggestion=suggestion[0] if suggestion else None,
+            )
+
+        if mutated:
+            self._state.step_count += 1
 
         return self._make_observation()
 
-    def _handle_fly_to(self, x: Optional[int], y: Optional[int]) -> None:
-        """Fly the drone to target coordinates."""
+    def _set_error(
+        self,
+        code: str,
+        message: str,
+        got: Any = None,
+        suggestion: Optional[str] = None,
+    ) -> None:
+        """Record both a prose error and a structured error_details payload."""
+        self._error = message
+        details: Dict[str, Any] = {
+            "code": code,
+            "message": message,
+            "valid": list(VALID_ACTION_TYPES),
+        }
+        if got is not None:
+            details["got"] = got
+        if suggestion is not None:
+            details["suggestion"] = suggestion
+        self._error_details = details
+
+    def _handle_fly_to(self, x: Optional[int], y: Optional[int]) -> bool:
+        """Fly the drone to target coordinates. Returns True if state mutated."""
         if x is None or y is None:
-            self._error = "fly_to requires both x and y coordinates."
-            return
+            self._set_error(
+                code="missing_coordinates",
+                message="fly_to requires both x and y coordinates.",
+            )
+            return False
 
         target = (x, y)
         dist = _euclidean(self._drone_pos, target)
         self._distance_traveled += dist
         self._drone_pos = target
+        return True
 
-    def _handle_pick_up(self) -> None:
-        """Pick up all packages at warehouse."""
+    def _handle_pick_up(self) -> bool:
+        """Pick up all packages at warehouse. Returns True if state mutated."""
         warehouse = self._task_config["warehouse"]
         dist_to_warehouse = _euclidean(self._drone_pos, warehouse)
 
         if dist_to_warehouse > DELIVERY_RADIUS:
-            self._error = (
-                f"Not at warehouse. Drone is at {self._drone_pos}, "
-                f"warehouse is at {warehouse} (distance: {dist_to_warehouse:.1f}, need <= {DELIVERY_RADIUS})."
+            self._set_error(
+                code="not_at_warehouse",
+                message=(
+                    f"Not at warehouse. Drone is at {self._drone_pos}, "
+                    f"warehouse is at {warehouse} (distance: {dist_to_warehouse:.1f}, need <= {DELIVERY_RADIUS})."
+                ),
             )
-            return
+            return False
 
         total = len(self._task_config["houses"])
         already_delivered = sum(1 for v in self._delivered.values() if v)
         remaining = total - already_delivered - self._packages_carried
         if remaining <= 0:
-            self._error = "No packages to pick up."
-            return
+            self._set_error(code="nothing_to_pick_up", message="No packages to pick up.")
+            return False
 
         self._packages_carried = remaining
+        return True
 
-    def _handle_deliver(self) -> None:
-        """Deliver a package to the nearest undelivered house within radius."""
+    def _handle_deliver(self) -> bool:
+        """Deliver a package to the nearest undelivered house within radius.
+
+        Returns True if state mutated.
+        """
         if self._packages_carried <= 0:
-            self._error = "No packages to deliver. Pick up packages at warehouse first."
-            return
+            self._set_error(
+                code="no_packages_carried",
+                message="No packages to deliver. Pick up packages at warehouse first.",
+            )
+            return False
 
-        # Find nearest undelivered house within radius
         nearest_house = None
         nearest_dist = float("inf")
 
@@ -269,14 +318,18 @@ class DroneEnvironment(Environment):
                 for name, hx, hy in self._task_config["houses"]
                 if not self._delivered[name]
             ]
-            self._error = (
-                f"No undelivered house within radius {DELIVERY_RADIUS} of {self._drone_pos}. "
-                f"Undelivered houses: {', '.join(undelivered)}."
+            self._set_error(
+                code="no_house_in_range",
+                message=(
+                    f"No undelivered house within radius {DELIVERY_RADIUS} of {self._drone_pos}. "
+                    f"Undelivered houses: {', '.join(undelivered)}."
+                ),
             )
-            return
+            return False
 
         self._delivered[nearest_house] = True
         self._packages_carried -= 1
+        return True
 
     def _is_done(self) -> bool:
         """Check if all packages are delivered."""
@@ -318,6 +371,7 @@ class DroneEnvironment(Environment):
             steps_taken=self._state.step_count,
             max_steps=self._task_config["max_steps"],
             error=self._error,
+            error_details=self._error_details,
             score=round(score, 4),
             task_name=self._task_name,
             done=done,

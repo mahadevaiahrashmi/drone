@@ -203,6 +203,99 @@ These are mostly copy-paste. The two traps we hit:
 
 3. **Catch `ImportError` in fallback imports, not just `ModuleNotFoundError`.** Relative imports beyond top-level raise `ImportError`.
 
+### Step 6.5 — (Optional) Add a custom visualization tab
+
+OpenEnv serves a Gradio UI at `/web` when `ENABLE_WEB_INTERFACE=true`. By default
+you get a generic **Playground** tab. You can add an environment-specific
+**Custom** tab by passing a `gradio_builder=` callable to `create_app`.
+
+Create `server/gradio_ui.py` with a builder of this shape:
+
+```python
+import gradio as gr
+from openenv.core.env_server.types import EnvironmentMetadata
+
+def build_drone_gradio_app(
+    web_manager, action_fields, metadata: EnvironmentMetadata | None,
+    is_chat_env: bool, title: str, quick_start_md: str,
+) -> gr.Blocks:
+    def _refresh():
+        env = getattr(web_manager, "env", None)
+        # Read live state off the environment singleton and return HTML / SVG
+        return render_grid(env), render_stats(env)
+
+    with gr.Blocks(title=f"{title} — Drone Visualization") as blocks:
+        gr.Markdown("# Drone Delivery Visualization")
+        refresh = gr.Button("Refresh", variant="primary")
+        svg = gr.HTML(value="<em>Reset the env, then click Refresh.</em>")
+        stats = gr.HTML(value="")
+        refresh.click(fn=_refresh, inputs=None, outputs=[svg, stats])
+        blocks.load(fn=_refresh, inputs=None, outputs=[svg, stats])
+    return blocks
+```
+
+Then in `server/app.py`, detect whether the installed `openenv-core` supports
+the `gradio_builder` parameter (older versions don't) and pass your builder:
+
+```python
+import inspect
+from openenv.core.env_server.http_server import create_app
+from .gradio_ui import build_drone_gradio_app
+
+if "gradio_builder" in inspect.signature(create_app).parameters:
+    app = create_app(factory, DroneAction, DroneObservation,
+                     env_name="drone", gradio_builder=build_drone_gradio_app)
+else:
+    app = create_app(factory, DroneAction, DroneObservation, env_name="drone")
+```
+
+**Design tips:**
+
+- Read **live state** from `web_manager.env` (the environment singleton your
+  factory returned), not from observations — this way the viz doesn't require
+  the agent to have stepped yet.
+- Render with **inline SVG**, not an image. Zero new dependencies, zooms
+  cleanly, and the Gradio `gr.HTML` component accepts it directly.
+- Add both a **manual refresh button** AND `blocks.load(...)` so the tab
+  populates on first open.
+- Keep the visualization **read-only** — stepping the environment belongs in
+  the Playground tab.
+
+### Step 6.6 — Prevent invalid inputs at three layers
+
+Agents (especially smaller LLMs) will send typos, forget coordinates, and
+invent action verbs. Don't fight that in one place — block invalid inputs at
+the layer closest to the source. Each layer is cheap on its own and they
+compose:
+
+| Layer | Audience | What to do |
+|-------|----------|------------|
+| **Pydantic model** | Both | `action_type: Literal["fly_to","pick_up","deliver"]`. Typos fail at parse time with `ValidationError` (HTTP 422). One-line change, biggest bang for buck. |
+| **HTTP `/step`** | LLMs, scripts | Runtime failures emit a **structured** error, not prose. Shape: `{code, message, valid, got?, suggestion?}`. Use `difflib.get_close_matches` for the suggestion — free, stdlib. |
+| **Gradio Custom tab** | Humans | `gr.Dropdown` for action_type/task and `gr.Number` with `precision=0` for x/y. A human physically cannot type an invalid value. |
+
+**Two design choices that matter:**
+
+1. **Keep a prose `error` field AND a structured `error_details` field.**
+   Prose is readable in logs; the structured shape is reliable for LLM parsing.
+   Agents reading the observation branch on `error_details.code`, not on
+   substring matching prose.
+2. **Don't count invalid actions against the step budget.** Only increment
+   `step_count` when the action mutates state. Lets agents probe the API
+   without burning their hard-mode budget on validation failures. Make each
+   handler return `bool` and bump the counter from `step()`:
+   ```python
+   if action_type == "fly_to":
+       mutated = self._handle_fly_to(action.x, action.y)
+   ...
+   if mutated:
+       self._state.step_count += 1
+   ```
+
+Also expose `valid_actions: list[str]` on every observation so the action
+grammar is on the wire every turn. Small models benefit most — they don't
+have to remember the schema from the task prompt.
+
 ### Step 7 — Write End-to-End Tests
 
 Don't just trust your grader — prove it. Write a test script that:

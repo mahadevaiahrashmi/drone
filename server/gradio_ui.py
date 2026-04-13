@@ -19,6 +19,13 @@ from typing import Any, Dict, List, Optional, Tuple
 import gradio as gr
 from openenv.core.env_server.types import EnvironmentMetadata
 
+try:
+    from ..models import DroneAction, VALID_ACTION_TYPES
+except (ModuleNotFoundError, ImportError):
+    from models import DroneAction, VALID_ACTION_TYPES
+
+VALID_TASKS = ["easy", "medium", "hard"]
+
 
 CELL = 40  # pixels per grid cell
 PAD = 20   # svg padding
@@ -233,9 +240,42 @@ def build_drone_gradio_app(
 ) -> gr.Blocks:
     """Build the Custom tab for the drone environment."""
 
-    def _refresh() -> Tuple[str, str]:
+    def _refresh() -> Tuple[str, str, str]:
         env = getattr(web_manager, "env", None)
-        return _render(env)
+        svg, stats = _render(env)
+        return svg, stats, ""
+
+    def _do_reset(task: str) -> Tuple[str, str, str]:
+        env = getattr(web_manager, "env", None)
+        if env is None:
+            return _empty_html(), "", "No environment bound."
+        try:
+            env.reset(task=task)
+            msg = f"Reset to task '{task}'."
+        except Exception as e:
+            msg = f"Reset failed: {e}"
+        svg, stats = _render(env)
+        return svg, stats, msg
+
+    def _do_step(action_type: str, x: float, y: float) -> Tuple[str, str, str]:
+        env = getattr(web_manager, "env", None)
+        if env is None:
+            return _empty_html(), "", "No environment bound."
+        try:
+            kwargs: Dict[str, Any] = {"action_type": action_type}
+            if action_type == "fly_to":
+                kwargs["x"] = int(x)
+                kwargs["y"] = int(y)
+            action = DroneAction(**kwargs)
+            obs = env.step(action)
+            if obs.error:
+                msg = f"Step error: {obs.error}"
+            else:
+                msg = f"Step ok: {action_type}"
+        except Exception as e:
+            msg = f"Step failed (parse-time validation): {e}"
+        svg, stats = _render(env)
+        return svg, stats, msg
 
     with gr.Blocks(title=f"{title} — Drone Visualization") as blocks:
         gr.Markdown("# Drone Delivery Visualization")
@@ -243,15 +283,45 @@ def build_drone_gradio_app(
             "A 2D grid view of the drone (**D**), warehouse (**W**), and houses. "
             "Red houses are pending; green houses are delivered. The dashed line is "
             "the house list in task order (not the optimal route). "
-            "Use the **Playground** tab to reset and step; then click **Refresh** below."
+            "Dropdowns below constrain action_type/task so invalid inputs are "
+            "structurally impossible from this UI."
         )
+
         with gr.Row():
+            task_dd = gr.Dropdown(
+                choices=VALID_TASKS, value="easy", label="Task", interactive=True
+            )
+            reset_btn = gr.Button("Reset", variant="secondary")
             refresh_btn = gr.Button("Refresh", variant="primary")
+
+        with gr.Row():
+            action_dd = gr.Dropdown(
+                choices=list(VALID_ACTION_TYPES),
+                value="pick_up",
+                label="action_type",
+                interactive=True,
+            )
+            x_in = gr.Number(value=0, label="x (fly_to only)", precision=0)
+            y_in = gr.Number(value=0, label="y (fly_to only)", precision=0)
+            step_btn = gr.Button("Step", variant="primary")
+
+        status_md = gr.Markdown(value="")
+
         with gr.Row():
             svg_html = gr.HTML(value=_empty_html(), show_label=False)
             stats_html = gr.HTML(value="", show_label=False)
 
-        refresh_btn.click(fn=_refresh, inputs=None, outputs=[svg_html, stats_html])
-        blocks.load(fn=_refresh, inputs=None, outputs=[svg_html, stats_html])
+        refresh_btn.click(
+            fn=_refresh, inputs=None, outputs=[svg_html, stats_html, status_md]
+        )
+        reset_btn.click(
+            fn=_do_reset, inputs=[task_dd], outputs=[svg_html, stats_html, status_md]
+        )
+        step_btn.click(
+            fn=_do_step,
+            inputs=[action_dd, x_in, y_in],
+            outputs=[svg_html, stats_html, status_md],
+        )
+        blocks.load(fn=_refresh, inputs=None, outputs=[svg_html, stats_html, status_md])
 
     return blocks
