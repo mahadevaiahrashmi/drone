@@ -28,9 +28,11 @@ except Exception as e:  # pragma: no cover
 try:
     from ..models import DroneAction, DroneObservation
     from .drone_environment import DroneEnvironment
+    from .gradio_ui import build_drone_gradio_app
 except (ModuleNotFoundError, ImportError):
     from models import DroneAction, DroneObservation
     from server.drone_environment import DroneEnvironment
+    from server.gradio_ui import build_drone_gradio_app
 
 
 # Create the app with web interface and README integration
@@ -43,13 +45,33 @@ def _drone_env_factory() -> DroneEnvironment:
     return _drone_env_singleton
 
 
-app = create_app(
-    _drone_env_factory,
-    DroneAction,
-    DroneObservation,
-    env_name="drone",
-    max_concurrent_envs=1,
-)
+import inspect as _inspect
+import logging as _logging
+
+_logger = _logging.getLogger(__name__)
+_create_app_sig = _inspect.signature(create_app)
+
+if "gradio_builder" in _create_app_sig.parameters:
+    app = create_app(
+        _drone_env_factory,
+        DroneAction,
+        DroneObservation,
+        env_name="drone",
+        max_concurrent_envs=1,
+        gradio_builder=build_drone_gradio_app,
+    )
+else:
+    _logger.warning(
+        "Installed openenv-core does not support gradio_builder; "
+        "custom drone visualization tab will not be available."
+    )
+    app = create_app(
+        _drone_env_factory,
+        DroneAction,
+        DroneObservation,
+        env_name="drone",
+        max_concurrent_envs=1,
+    )
 
 
 def main(host: str = "0.0.0.0", port: int = 8000):
