@@ -154,19 +154,63 @@ class _LocalResult:
 
 class _LocalEnv:
     """In-process drone env — no Docker, no HTTP. Async to match EnvClient API."""
-    def __init__(self, task: str):
+    def __init__(self):
         from server.drone_environment import DroneEnvironment
         self._env = DroneEnvironment()
-        self._task = task
 
-    async def reset(self):
-        return _LocalResult(self._env.reset(self._task))
+    async def reset(self, task: str = "easy"):
+        return _LocalResult(self._env.reset(task))
 
     async def step(self, action):
         return _LocalResult(self._env.step(action))
 
     async def close(self):
         pass
+
+
+TASKS_TO_RUN = ["easy", "medium", "hard"]
+
+
+async def run_task(env, client: OpenAI, task_name: str) -> dict:
+    """Run a single task and return a result summary."""
+    rewards: List[float] = []
+    steps_taken = 0
+    score = 0.0
+    success = False
+
+    log_start(task=task_name, env=BENCHMARK, model=MODEL_NAME)
+
+    result = await env.reset(task=task_name)
+    obs = result.observation
+
+    for step in range(1, MAX_STEPS + 1):
+        if result.done:
+            break
+
+        obs_text = format_observation(obs)
+        raw_action = get_model_action(client, obs_text)
+        action = parse_action(raw_action)
+
+        result = await env.step(action)
+        obs = result.observation
+
+        reward = result.reward or 0.0
+        done = result.done
+        error = obs.error
+
+        rewards.append(reward)
+        steps_taken = step
+        score = obs.score
+
+        action_str = raw_action.replace("\n", " ")[:80]
+        log_step(step=step, action=action_str, reward=reward, done=done, error=error)
+
+        if done:
+            success = score >= 0.5
+            break
+
+    log_end(success=success, steps=steps_taken, score=score, rewards=rewards)
+    return {"task": task_name, "success": success, "steps": steps_taken, "score": score}
 
 
 async def main() -> None:
@@ -177,7 +221,7 @@ async def main() -> None:
     base_url = os.getenv("BASE_URL")
 
     if local_mode:
-        env = _LocalEnv(TASK_NAME)
+        env = _LocalEnv()
     elif base_url:
         env = DroneEnv(base_url=base_url)
     else:
@@ -187,49 +231,23 @@ async def main() -> None:
             )
         env = await DroneEnv.from_docker_image(IMAGE_NAME)
 
-    rewards: List[float] = []
-    steps_taken = 0
-    score = 0.0
-    success = False
-
-    log_start(task=TASK_NAME, env=BENCHMARK, model=MODEL_NAME)
-
+    results: List[dict] = []
     try:
-        result = await env.reset()
-        obs = result.observation
-
-        for step in range(1, MAX_STEPS + 1):
-            if result.done:
-                break
-
-            obs_text = format_observation(obs)
-            raw_action = get_model_action(client, obs_text)
-            action = parse_action(raw_action)
-
-            result = await env.step(action)
-            obs = result.observation
-
-            reward = result.reward or 0.0
-            done = result.done
-            error = obs.error
-
-            rewards.append(reward)
-            steps_taken = step
-            score = obs.score
-
-            action_str = raw_action.replace("\n", " ")[:80]
-            log_step(step=step, action=action_str, reward=reward, done=done, error=error)
-
-            if done:
-                success = score >= 0.5
-                break
-
+        for task_name in TASKS_TO_RUN:
+            results.append(await run_task(env, client, task_name))
     finally:
         try:
             await env.close()
         except Exception as e:
             print(f"[DEBUG] env.close() error: {e}", flush=True)
-        log_end(success=success, steps=steps_taken, score=score, rewards=rewards)
+
+        print("\n=== SUMMARY ===", flush=True)
+        for r in results:
+            print(
+                f"  {r['task']:<8} success={str(r['success']).lower():<5} "
+                f"steps={r['steps']:<3} score={r['score']:.3f}",
+                flush=True,
+            )
 
 
 if __name__ == "__main__":
